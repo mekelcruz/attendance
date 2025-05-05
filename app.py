@@ -1,23 +1,317 @@
 import sys
 import psycopg2
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QFrame, QMessageBox, QHBoxLayout
+    QApplication, QWidget, QLabel, QLineEdit, QVBoxLayout, QFrame,
+    QMessageBox, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem
 )
-from PyQt5.QtGui import QFont, QPixmap
-from PyQt5.QtCore import Qt, QTimer, QTime
+from PyQt5.QtGui import QFont, QPixmap, QPalette, QBrush, QIcon
+from PyQt5.QtCore import Qt, QTimer, QTime, QSize
+import csv
+from PyQt5.QtWidgets import QFileDialog
+import csv
+from PyQt5.QtWidgets import QFileDialog, QHBoxLayout
+from PyQt5.QtWidgets import QDateEdit
+from PyQt5.QtCore import QDate
+
+# Fixes for AdminWindow class
+class AdminWindow(QWidget):
+    def __init__(self, db_conn):
+        super().__init__()
+        self.conn = db_conn
+        self.cursor = self.conn.cursor()
+
+        self.setWindowTitle("Admin Dashboard - Attendance Logs")
+        self.setGeometry(100, 100, 1000, 600)
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.title = QLabel("Attendance Logs")
+        self.title.setFont(QFont("Arial", 18, QFont.Bold))
+        self.title.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self.title)
+
+        # Table setup
+        self.table = QTableWidget()
+        self.layout.addWidget(self.table)
+
+        ##Buttons layout
+        buttons_layout = QHBoxLayout()
+
+        # Buttons
+        self.import_students_btn = QPushButton("Import Students CSV")
+        self.download_attendance_btn = QPushButton("Export Log CSV")
+        self.download_template_btn = QPushButton("Download Template")
+
+        # Date Filter
+        buttons_layout.addWidget(QLabel("Filter by Date:"))
+        self.date_filter = QDateEdit()
+        self.date_filter.setCalendarPopup(True)
+        self.date_filter.setDate(QDate.currentDate())
+        self.date_filter.setDisplayFormat("yyyy-MM-dd")
+        self.date_filter.dateChanged.connect(self.load_attendance_summary)
+        buttons_layout.addWidget(self.date_filter)
+
+        self.layout.addLayout(buttons_layout)
+
+        self.load_attendance_summary()  # Initial load
+
+        # Style and size
+        self.import_students_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        self.import_students_btn.setFixedWidth(200)
+
+        for btn in [self.download_attendance_btn, self.download_template_btn]:
+            btn.setFixedWidth(200)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #007bff;
+                    color: white;
+                    padding: 10px;
+                    font-weight: bold;
+                    border-radius: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #0056b3;
+                }
+            """)
+
+        # Connect buttons to functions
+        self.import_students_btn.clicked.connect(self.import_students)
+        self.download_attendance_btn.clicked.connect(self.download_csv)
+        self.download_template_btn.clicked.connect(self.download_template)
+
+        # Add to layout
+        buttons_layout.addWidget(self.import_students_btn)
+        buttons_layout.addWidget(self.download_attendance_btn)
+        buttons_layout.addWidget(self.download_template_btn)
+        self.layout.addLayout(buttons_layout)
 
 
+        self.load_attendance_summary()
+
+    def import_students(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open Students CSV", "", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        try:
+            with open(path, newline='', encoding='utf-8') as file:
+                reader = csv.reader(file)
+                headers = next(reader)  # Skip header
+                for row in reader:
+                    if len(row) < 5:
+                        continue  # Skip malformed rows
+
+                    sr_code, full_name, college, program, campus = row
+                    self.cursor.execute("""
+                        INSERT INTO name_tbl (sr_code, full_name, "College", "PROGRAM", "CAMPUS")
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (sr_code) DO NOTHING;
+                    """, (sr_code, full_name, college, program, campus))
+
+                self.conn.commit()
+                QMessageBox.information(self, "Success", "Students imported successfully.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import students:\n{e}")
+
+    def load_attendance_summary(self):
+        try:
+            selected_date = self.date_filter.date().toString("yyyy-MM-dd")
+            query = """
+                SELECT 
+                    t.date_in::date AS date,
+                    t.sr_code,
+                    n.full_name,
+                    n."College",
+                    n."PROGRAM",
+                    to_char(t.date_in, 'HH12:MI:SS AM') AS time_in
+                FROM 
+                    time_tbl t
+                JOIN 
+                    name_tbl n ON t.sr_code = n.sr_code
+                WHERE 
+                    t.date_in::date = %s
+                ORDER BY 
+                    t.date_in DESC;
+            """
+            self.cursor.execute(query, (selected_date,))
+            self.records = self.cursor.fetchall()
+
+            self.table.setRowCount(len(self.records))
+            self.table.setColumnCount(6)
+            self.table.setHorizontalHeaderLabels([
+                "Date", "SR Code", "Full Name", "College", "Program", "Time-In"
+            ])
+
+            for row_idx, row_data in enumerate(self.records):
+                for col_idx, col_data in enumerate(row_data):
+                    self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(col_data)))
+
+            self.table.resizeColumnsToContents()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Database Error", f"Failed to load data:\n{e}")
+
+
+    def download_csv(self):
+        if not hasattr(self, "records") or not self.records:
+            QMessageBox.warning(self, "No Data", "There is no data to export.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save Attendance CSV", "Attendance.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        try:
+            with open(path, mode='w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow(["Date", "SR Code", "Full Name", "College", "Program", "Time-In"])
+                writer.writerows(self.records)
+
+            QMessageBox.information(self, "Success", "Attendance CSV has been saved successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to save CSV:\n{e}")
+
+    def download_template(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Template CSV", "Student_Template.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        try:
+            with open(path, mode='w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow(["SR Code", "Full Name", "College", "Program", "Campus"])
+            QMessageBox.information(self, "Template Saved", "Template CSV saved successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save template:\n{e}")
+
+
+
+
+# Login Page
+class LoginPage(QWidget):
+    def __init__(self, conn, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.background_pixmap = QPixmap("ATTENDANCE.png")
+        self.setWindowTitle("Admin Login")
+        self.setAutoFillBackground(True)
+        self.init_ui()
+
+    def resizeEvent(self, event):
+        if not self.background_pixmap.isNull():
+            scaled = self.background_pixmap.scaled(
+                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+            )
+            palette = QPalette()
+            palette.setBrush(QPalette.Window, QBrush(scaled))
+            self.setPalette(palette)
+        super().resizeEvent(event)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+
+        title = QLabel("Admin Login")
+        title.setFont(QFont("Times New Roman", 24, QFont.Bold))
+        title.setStyleSheet("color: black;")
+        title.setAlignment(Qt.AlignCenter)
+
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Username")
+        self.username_input.setFixedWidth(300)
+        self.username_input.setFont(QFont("Times New Roman", 14))
+        self.username_input.setStyleSheet("padding: 10px;")
+
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setFixedWidth(300)
+        self.password_input.setFont(QFont("Times New Roman", 14))
+        self.password_input.setStyleSheet("padding: 10px;")
+
+        login_btn = QPushButton("Login")
+        login_btn.setFont(QFont("Times New Roman", 14, QFont.Bold))
+        login_btn.setFixedWidth(150)
+        login_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d90012;
+                color: white;
+                padding: 10px;
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background-color: #a8000f;
+            }
+        """)
+        login_btn.clicked.connect(self.validate_login)
+
+        layout.addWidget(title)
+        layout.addSpacing(20)
+        layout.addWidget(self.username_input)
+        layout.addWidget(self.password_input)
+        layout.addSpacing(20)
+        layout.addWidget(login_btn, alignment=Qt.AlignCenter)
+
+    def validate_login(self):
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+
+        if username == "admin" and password == "library123":
+            QMessageBox.information(self, "Login Successful", "Welcome, admin!")
+            self.open_admin_window()
+        else:
+            QMessageBox.warning(self, "Login Failed", "Invalid username or password.")
+
+    def open_admin_window(self):
+        self.admin_window = AdminWindow(self.conn)
+        self.admin_window.show()
+        self.close()
+
+
+# Main Attendance App
 class AttendanceApp(QWidget):
     def __init__(self):
         super().__init__()
+        self.background_pixmap = QPixmap()
         self.setWindowTitle("Attendance System")
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint |
                             Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
         self.showMaximized()
+        self.setAutoFillBackground(True)
+
+        self.set_background_image("ATTENDANCE.png")
         self.init_ui()
         self.connect_db()
         self.setup_timer()
+
+    def set_background_image(self, image_path):
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            print(f"Warning: Could not load background image from '{image_path}'")
+        else:
+            self.background_pixmap = pixmap
+
+    def resizeEvent(self, event):
+        if not self.background_pixmap.isNull():
+            scaled = self.background_pixmap.scaled(
+                self.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+            )
+            palette = QPalette()
+            palette.setBrush(QPalette.Window, QBrush(scaled))
+            self.setPalette(palette)
+        super().resizeEvent(event)
 
     def connect_db(self):
         try:
@@ -48,16 +342,14 @@ class AttendanceApp(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        self.setStyleSheet("background-color: white;")
-
         header = QFrame()
         header.setStyleSheet("background-color: #d90012;")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(20, 10, 20, 10)
-        header_layout.setSpacing(20)
+        header_layout.setSpacing(10)
 
         logo_label = QLabel()
-        logo_pixmap = QPixmap("Batangas_State_Logo.png").scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        logo_pixmap = QPixmap("Batangas_State_Logo.png").scaled(130, 130, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         logo_label.setPixmap(logo_pixmap)
         logo_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
@@ -69,11 +361,11 @@ class AttendanceApp(QWidget):
         uni_subtitle = QLabel("THE NATIONAL ENGINEERING UNIVERSITY")
         uni_subtitle.setFont(QFont("Times New Roman", 14))
         uni_subtitle.setStyleSheet("color: white;")
-        uni_subtitle.setAlignment(Qt.AlignLeft)
+        uni_subtitle.setAlignment(Qt.AlignHCenter)
 
         uni_text_layout = QVBoxLayout()
-        uni_text_layout.setContentsMargins(0, 0, 0, 0)
-        uni_text_layout.setSpacing(5)
+        uni_text_layout.setContentsMargins(0, 25, 0, 0)
+        uni_text_layout.setSpacing(0)
         uni_text_layout.addWidget(uni_name)
         uni_text_layout.addWidget(uni_subtitle)
 
@@ -90,13 +382,6 @@ class AttendanceApp(QWidget):
 
         header_layout.addWidget(logo_and_text_widget, alignment=Qt.AlignLeft | Qt.AlignTop)
         header_layout.addStretch()
-
-        self.time_label = QLabel()
-        self.time_label.setFont(QFont("Times New Roman", 18, QFont.Bold))
-        self.time_label.setStyleSheet("color: white;")
-        self.time_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
-        header_layout.addWidget(self.time_label, alignment=Qt.AlignTop)
-
         main_layout.addWidget(header)
 
         center_layout = QVBoxLayout()
@@ -105,7 +390,7 @@ class AttendanceApp(QWidget):
         main_layout.addLayout(center_layout, stretch=1)
 
         sr_frame = QFrame()
-        sr_frame.setStyleSheet("background-color: rgba(255, 255, 255, 0.9); border-radius: 10px; border: 2px solid #0056b3;")
+        sr_frame.setStyleSheet("background-color: transparent; border: none;")
         sr_frame.setFixedSize(500, 250)
 
         sr_layout = QVBoxLayout(sr_frame)
@@ -121,42 +406,65 @@ class AttendanceApp(QWidget):
         self.sr_input = QLineEdit()
         self.sr_input.setPlaceholderText("Enter your SR CODE")
         self.sr_input.setStyleSheet("""
-            padding: 12px;
-            border-radius: 5px;
-            border: 2px solid #0056b3;
-            font-size: 18px;
+            padding: 15px;
+            border: none;
+            border-bottom: 3px solid #000000;
+            font-size: 30px;
             font-family: Times New Roman;
+            background-color: transparent;
         """)
-        self.sr_input.setFixedWidth(350)
-        self.sr_input.setAlignment(Qt.AlignCenter)
+        self.sr_input.setFixedWidth(500)
+        self.sr_input.setAlignment(Qt.AlignHCenter)
+        self.sr_input.returnPressed.connect(self.mark_attendance)
         sr_layout.addWidget(self.sr_input)
 
-        mark_button = QPushButton("Mark Attendance")
-        mark_button.setFont(QFont("Times New Roman", 14))
-        mark_button.setStyleSheet("""
-            QPushButton {
-                background-color: #d90012;
-                color: white;
-                padding: 10px 25px;
-                border-radius: 5px;
-                font-size: 16px;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #8f000c;
-            }
-        """)
-        mark_button.clicked.connect(self.mark_attendance)
-        sr_layout.addWidget(mark_button, alignment=Qt.AlignCenter)
-
-        self.status_label = QLabel("[Note: Attendance]")
-        self.status_label.setFont(QFont("Times New Roman", 14))
+        self.status_label = QLabel("Attendance Check")
+        self.status_label.setFont(QFont("Times New Roman", 10))
         self.status_label.setStyleSheet("color: black; font-style: italic;")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setAlignment(Qt.AlignHCenter)
         sr_layout.addWidget(self.status_label)
 
         center_layout.addWidget(sr_frame)
-        main_layout.addStretch(1)
+
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setContentsMargins(20, 20, 20, 20)
+
+        self.time_label = QLabel()
+        self.time_label.setFont(QFont("Times New Roman", 20, QFont.Bold))
+        self.time_label.setStyleSheet("""
+            background-color: #d90012;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+        """)
+        self.time_label.setAlignment(Qt.AlignCenter)
+
+        self.admin_btn = QPushButton()
+        self.admin_btn.setIcon(QIcon("settings.png"))
+        self.admin_btn.setIconSize(QSize(50, 50))
+        self.admin_btn.setFixedSize(70, 70)
+        self.admin_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d90012;
+                border-radius: 35px;
+            }
+            QPushButton:hover {
+                background-color: #a8000f;
+            }
+        """)
+        self.admin_btn.setToolTip("Admin Settings")
+        self.admin_btn.clicked.connect(self.open_admin)
+
+        bottom_layout.addWidget(self.time_label)
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(self.admin_btn)
+
+        main_layout.addLayout(bottom_layout)
+
+    def open_admin(self):
+        self.login_page = LoginPage(self.conn)
+        self.login_page.setGeometry(self.geometry())
+        self.login_page.show()
 
     def mark_attendance(self):
         sr_code = self.sr_input.text().strip()
@@ -175,10 +483,14 @@ class AttendanceApp(QWidget):
             full_name = result[0]
 
             try:
-                self.cursor.execute('INSERT INTO time_tbl ("sr_code") VALUES (%s)', (sr_code,))
+                self.cursor.execute('INSERT INTO time_tbl (sr_code) VALUES (%s)', (sr_code,))
                 self.conn.commit()
-                self.status_label.setText(f"Attendance marked for: {full_name.upper()} ({sr_code})")
+
+                self.status_label.setText(
+                    f"<i>Attendance marked for:</i><br><b>{full_name.upper()} ({sr_code})</b>"
+                )
                 self.sr_input.clear()
+                self.sr_input.setFocus()
 
             except Exception as insert_error:
                 self.conn.rollback()
