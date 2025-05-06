@@ -4,15 +4,12 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QVBoxLayout, QFrame,
-    QMessageBox, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem
+    QMessageBox, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
+    QComboBox, QSpinBox, QDateEdit, QFileDialog
 )
 from PyQt5.QtGui import QFont, QPixmap, QPalette, QBrush, QIcon
-from PyQt5.QtCore import Qt, QTimer, QTime, QSize, QDateTime
+from PyQt5.QtCore import Qt, QTimer, QTime, QSize, QDateTime, QDate
 import csv
-from PyQt5.QtWidgets import QFileDialog
-from PyQt5.QtWidgets import QDateEdit
-from PyQt5.QtCore import QDate
-from PyQt5.QtCore import QTimer  # Make sure to import QTimer
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -76,24 +73,58 @@ class AdminWindow(QWidget):
         self.table = QTableWidget()
         self.layout.addWidget(self.table)
 
+        # Filter controls layout
+        filter_layout = QHBoxLayout()
+
+        # Daily filter
+        filter_layout.addWidget(QLabel("Daily Filter:"))
+        self.date_filter = QDateEdit()
+        self.date_filter.setCalendarPopup(True)
+        self.date_filter.setDate(QDate.currentDate())
+        self.date_filter.setDisplayFormat("yyyy-MM-dd")
+        self.date_filter.dateChanged.connect(self.load_daily_attendance)
+        filter_layout.addWidget(self.date_filter)
+
+        # Monthly filter
+        filter_layout.addWidget(QLabel("Monthly Filter:"))
+        
+        self.month_combo = QComboBox()
+        self.month_combo.addItems(["January", "February", "March", "April", "May", "June", 
+                                 "July", "August", "September", "October", "November", "December"])
+        self.month_combo.setCurrentIndex(QDate.currentDate().month() - 1)
+        filter_layout.addWidget(self.month_combo)
+        
+        self.year_spin = QSpinBox()
+        self.year_spin.setRange(2000, 2100)
+        self.year_spin.setValue(QDate.currentDate().year())
+        filter_layout.addWidget(self.year_spin)
+        
+        self.monthly_export_btn = QPushButton("Export Monthly Data")
+        self.monthly_export_btn.setFixedWidth(200)
+        self.monthly_export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        self.monthly_export_btn.clicked.connect(self.export_monthly_data)
+        filter_layout.addWidget(self.monthly_export_btn)
+
+        self.layout.addLayout(filter_layout)
+
         # Buttons layout
         buttons_layout = QHBoxLayout()
 
         # Buttons
         self.import_students_btn = QPushButton("Import Students CSV")
-        self.download_attendance_btn = QPushButton("Export Log CSV")
+        self.download_attendance_btn = QPushButton("Export Daily CSV")
         self.download_template_btn = QPushButton("Download Template")
-
-        # Date Filter
-        buttons_layout.addWidget(QLabel("Filter by Date:"))
-        self.date_filter = QDateEdit()
-        self.date_filter.setCalendarPopup(True)
-        self.date_filter.setDate(QDate.currentDate())
-        self.date_filter.setDisplayFormat("yyyy-MM-dd")
-        self.date_filter.dateChanged.connect(self.load_attendance_summary)
-        buttons_layout.addWidget(self.date_filter)
-
-        self.layout.addLayout(buttons_layout)
 
         # Style and size
         self.import_students_btn.setStyleSheet("""
@@ -136,37 +167,51 @@ class AdminWindow(QWidget):
         buttons_layout.addWidget(self.download_template_btn)
         self.layout.addLayout(buttons_layout)
 
-        self.load_attendance_summary()
+        # Load initial data
+        self.load_daily_attendance()
 
-    def import_students(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open Students CSV", "", "CSV Files (*.csv)")
-        if not path:
-            return
-
+    def load_daily_attendance(self):
+        """Load attendance data for the selected date"""
+        selected_date = self.date_filter.date().toString("yyyy-MM-dd")
         try:
-            with open(path, newline='', encoding='utf-8') as file:
-                reader = csv.reader(file)
-                headers = next(reader)  # Skip header
-                for row in reader:
-                    if len(row) < 5:
-                        continue  # Skip malformed rows
+            query = """
+                SELECT 
+                    t.sr_code,
+                    n.full_name,
+                    n.College,
+                    n.PROGRAM,
+                    time(t.time_in) AS time_in
+                FROM 
+                    time_tbl t
+                JOIN 
+                    name_tbl n ON t.sr_code = n.sr_code
+                WHERE 
+                    date(t.date_in) = ?
+                ORDER BY 
+                    t.time_in DESC;
+            """
+            
+            self.cursor.execute(query, (selected_date,))
+            self.records = self.cursor.fetchall()
 
-                    sr_code, full_name, college, program, campus = row
-                    self.cursor.execute("""
-                        INSERT INTO name_tbl (sr_code, full_name, College, PROGRAM, CAMPUS)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(sr_code) DO NOTHING;
-                    """, (sr_code, full_name, college, program, campus))
+            self.table.setRowCount(len(self.records))
+            self.table.setColumnCount(5)
+            self.table.setHorizontalHeaderLabels([
+                "SR Code", "Full Name", "College", "Program", "Time-In"
+            ])
 
-                self.conn.commit()
-                QMessageBox.information(self, "Success", "Students imported successfully.")
+            for row_idx, row_data in enumerate(self.records):
+                for col_idx, col_data in enumerate(row_data):
+                    self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(col_data)))
+
+            self.table.resizeColumnsToContents()
 
         except Exception as e:
-            QMessageBox.critical(self, "Import Error", f"Failed to import students:\n{e}")
+            QMessageBox.critical(self, "Database Error", f"Failed to load daily data:\n{e}")
 
-    def load_attendance_summary(self):
+    def load_monthly_attendance(self, month, year):
+        """Load attendance data for a specific month and year"""
         try:
-            selected_date = self.date_filter.date().toString("yyyy-MM-dd")
             query = """
                 SELECT 
                     date(date_in) AS date,
@@ -180,11 +225,15 @@ class AdminWindow(QWidget):
                 JOIN 
                     name_tbl n ON t.sr_code = n.sr_code
                 WHERE 
-                    date(t.date_in) = ?
+                    strftime('%m', date_in) = ? AND
+                    strftime('%Y', date_in) = ?
                 ORDER BY 
                     t.date_in DESC;
             """
-            self.cursor.execute(query, (selected_date,))
+            month_str = f"{month:02d}"  # Ensure 2-digit month
+            year_str = str(year)
+            
+            self.cursor.execute(query, (month_str, year_str))
             self.records = self.cursor.fetchall()
 
             self.table.setRowCount(len(self.records))
@@ -200,14 +249,29 @@ class AdminWindow(QWidget):
             self.table.resizeColumnsToContents()
 
         except Exception as e:
-            QMessageBox.critical(self, "Database Error", f"Failed to load data:\n{e}")
+            QMessageBox.critical(self, "Database Error", f"Failed to load monthly data:\n{e}")
 
-    def download_csv(self):
+    def export_monthly_data(self):
+        """Export data for the selected month and year"""
+        month = self.month_combo.currentIndex() + 1  # Months are 1-12
+        year = self.year_spin.value()
+        
+        # First load the data to verify there's something to export
+        self.load_monthly_attendance(month, year)
+        
         if not hasattr(self, "records") or not self.records:
-            QMessageBox.warning(self, "No Data", "There is no data to export.")
+            QMessageBox.warning(self, "No Data", f"No attendance data found for {self.month_combo.currentText()} {year}")
             return
-
-        path, _ = QFileDialog.getSaveFileName(self, "Save Attendance CSV", "Attendance.csv", "CSV Files (*.csv)")
+            
+        # Suggest a filename with the month and year
+        default_filename = f"Attendance_{self.month_combo.currentText()}_{year}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save Monthly Attendance CSV", 
+            default_filename, 
+            "CSV Files (*.csv)"
+        )
+        
         if not path:
             return
 
@@ -217,12 +281,100 @@ class AdminWindow(QWidget):
                 writer.writerow(["Date", "SR Code", "Full Name", "College", "Program", "Time-In"])
                 writer.writerows(self.records)
 
-            QMessageBox.information(self, "Success", "Attendance CSV has been saved successfully.")
+            QMessageBox.information(
+                self, 
+                "Export Successful", 
+                f"Monthly attendance data for {self.month_combo.currentText()} {year} has been saved successfully."
+            )
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to save CSV:\n{e}")
+            QMessageBox.critical(self, "Export Error", f"Failed to save monthly CSV:\n{e}")
+
+    def import_students(self):
+        """Import students from CSV file"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Open Students CSV", 
+            "", 
+            "CSV Files (*.csv)"
+        )
+        
+        if not path:
+            return
+
+        try:
+            with open(path, mode='r', encoding='utf-8') as file:
+                reader = csv.reader(file)
+                next(reader)  # Skip header row
+                
+                # Prepare batch insert
+                data = []
+                for row in reader:
+                    if len(row) >= 5:  # Ensure we have all required columns
+                        data.append((row[0], row[1], row[2], row[3], row[4]))
+                
+                # Insert in batch
+                self.cursor.executemany(
+                    "INSERT OR REPLACE INTO name_tbl (sr_code, full_name, College, PROGRAM, CAMPUS) VALUES (?, ?, ?, ?, ?)",
+                    data
+                )
+                self.conn.commit()
+                
+                QMessageBox.information(
+                    self, 
+                    "Import Successful", 
+                    f"Successfully imported {len(data)} student records."
+                )
+                
+        except Exception as e:
+            self.conn.rollback()
+            QMessageBox.critical(self, "Import Error", f"Failed to import students:\n{e}")
+
+    def download_csv(self):
+        """Export daily attendance data to CSV"""
+        selected_date = self.date_filter.date().toString("yyyy-MM-dd")
+        
+        # First load the data to verify there's something to export
+        self.load_daily_attendance()
+        
+        if not hasattr(self, "records") or not self.records:
+            QMessageBox.warning(self, "No Data", f"No attendance data found for {selected_date}")
+            return
+            
+        # Suggest a filename with the date
+        default_filename = f"Attendance_{selected_date}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save Daily Attendance CSV", 
+            default_filename, 
+            "CSV Files (*.csv)"
+        )
+        
+        if not path:
+            return
+
+        try:
+            with open(path, mode='w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow(["SR Code", "Full Name", "College", "Program", "Time-In"])
+                writer.writerows(self.records)
+
+            QMessageBox.information(
+                self, 
+                "Export Successful", 
+                f"Daily attendance data for {selected_date} has been saved successfully."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to save daily CSV:\n{e}")
 
     def download_template(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Template CSV", "Student_Template.csv", "CSV Files (*.csv)")
+        """Download a template CSV for student imports"""
+        path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save Template CSV", 
+            "Student_Import_Template.csv", 
+            "CSV Files (*.csv)"
+        )
+        
         if not path:
             return
 
@@ -230,9 +382,15 @@ class AdminWindow(QWidget):
             with open(path, mode='w', newline='', encoding='utf-8') as file:
                 writer = csv.writer(file)
                 writer.writerow(["SR Code", "Full Name", "College", "Program", "Campus"])
-            QMessageBox.information(self, "Template Saved", "Template CSV saved successfully.")
+                writer.writerow(["20-12345", "Juan Dela Cruz", "CEAS", "BSIT", "Alangilan"])
+
+            QMessageBox.information(
+                self, 
+                "Template Downloaded", 
+                "Student import template has been saved successfully."
+            )
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save template:\n{e}")
+            QMessageBox.critical(self, "Export Error", f"Failed to save template:\n{e}")
 
 class LoginPage(QWidget):
     def __init__(self, conn, parent=None):
@@ -294,9 +452,6 @@ class LoginPage(QWidget):
         self.username_input.returnPressed.connect(self.validate_login)
         self.password_input.returnPressed.connect(self.validate_login)
 
-        layout.addWidget(login_btn, alignment=Qt.AlignCenter)
-
-
         layout.addWidget(title)
         layout.addSpacing(20)
         layout.addWidget(self.username_input)
@@ -309,9 +464,7 @@ class LoginPage(QWidget):
         password = self.password_input.text().strip()
 
         if username == "admin" and password == "library123":
-            # Remove this line to skip the popup:
-            # QMessageBox.information(self, "Login Successful", "Welcome, admin!")
-            self.open_admin_window()  # Directly open admin window
+            self.open_admin_window()
         else:
             QMessageBox.warning(self, "Login Failed", "Invalid username or password.")
 
