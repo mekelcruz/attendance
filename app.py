@@ -5,14 +5,15 @@ from datetime import datetime, timedelta, timezone
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QVBoxLayout, QFrame,
     QMessageBox, QHBoxLayout, QPushButton, QTableWidget, QTableWidgetItem,
-    QComboBox, QSpinBox, QDateEdit, QFileDialog
+    QComboBox, QSpinBox, QDateEdit, QFileDialog, QCheckBox
 )
 from PyQt5.QtGui import QFont, QPixmap, QPalette, QBrush, QIcon
 from PyQt5.QtCore import Qt, QTimer, QTime, QSize, QDateTime, QDate
 import csv
+from PyQt5.QtGui import QIcon
 
 def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
+    """Get absolute path to resource, works for dev and for PyInstaller"""
     try:
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
@@ -28,8 +29,24 @@ def resource_path(relative_path):
     
     return path
 
+def get_persistent_db_path():
+    """Get a persistent database path that works across platforms"""
+    if sys.platform == "win32":
+        # On Windows, use AppData/Local
+        base_path = os.getenv('LOCALAPPDATA')
+        app_path = os.path.join(base_path, "AttendanceSystem")
+    else:
+        # On Linux/Mac, use home directory
+        base_path = os.path.expanduser("~")
+        app_path = os.path.join(base_path, ".attendance_system")
+    
+    # Create directory if it doesn't exist
+    os.makedirs(app_path, exist_ok=True)
+    
+    return os.path.join(app_path, "attendance.db")
+
 def load_pixmap(image_path):
-    """ Safely load a pixmap with error handling """
+    """Safely load a pixmap with error handling"""
     path = resource_path(image_path)
     if path is None:
         return QPixmap()
@@ -40,7 +57,7 @@ def load_pixmap(image_path):
     return pixmap
 
 def load_icon(icon_path, size=None):
-    """ Safely load an icon with error handling """
+    """Safely load an icon with error handling"""
     path = resource_path(icon_path)
     if path is None:
         return QIcon()
@@ -58,11 +75,40 @@ class AdminWindow(QWidget):
         super().__init__()
         self.conn = db_conn
         self.cursor = self.conn.cursor()
-
+        self.setWindowIcon(load_icon("Batangas_State_Logo.png"))
         self.setWindowTitle("Admin Dashboard - Attendance Logs")
         self.setGeometry(100, 100, 1000, 600)
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
+
+        # Add refresh controls at the top
+        refresh_layout = QHBoxLayout()
+        
+        # Refresh button
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setFixedWidth(100)
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        self.refresh_btn.clicked.connect(self.refresh_data)
+        refresh_layout.addWidget(self.refresh_btn)
+        
+        # Auto-refresh toggle
+        self.auto_refresh_check = QCheckBox("Auto-refresh (10 sec)")
+        self.auto_refresh_check.stateChanged.connect(self.toggle_auto_refresh)
+        refresh_layout.addWidget(self.auto_refresh_check)
+        
+        refresh_layout.addStretch()
+        self.layout.addLayout(refresh_layout)
 
         self.title = QLabel("Attendance Logs")
         self.title.setFont(QFont("Arial", 18, QFont.Bold))
@@ -167,8 +213,29 @@ class AdminWindow(QWidget):
         buttons_layout.addWidget(self.download_template_btn)
         self.layout.addLayout(buttons_layout)
 
+        # Setup auto-refresh timer
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_data)
+        self.auto_refresh_interval = 10000  # 10 seconds
+
         # Load initial data
         self.load_daily_attendance()
+
+    def refresh_data(self):
+        """Refresh the current view (daily or monthly)"""
+        if self.date_filter.isEnabled():  # If daily view is active
+            self.load_daily_attendance()
+        else:  # Monthly view is active
+            month = self.month_combo.currentIndex() + 1
+            year = self.year_spin.value()
+            self.load_monthly_attendance(month, year)
+
+    def toggle_auto_refresh(self, state):
+        """Toggle auto-refresh timer based on checkbox state"""
+        if state == Qt.Checked:
+            self.refresh_timer.start(self.auto_refresh_interval)
+        else:
+            self.refresh_timer.stop()
 
     def load_daily_attendance(self):
         """Load attendance data for the selected date"""
@@ -180,7 +247,7 @@ class AdminWindow(QWidget):
                     n.full_name,
                     n.College,
                     n.PROGRAM,
-                    time(t.time_in) AS time_in
+                    strftime('%I:%M:%S %p', t.time_in) AS time_in_12hr
                 FROM 
                     time_tbl t
                 JOIN 
@@ -197,7 +264,7 @@ class AdminWindow(QWidget):
             self.table.setRowCount(len(self.records))
             self.table.setColumnCount(5)
             self.table.setHorizontalHeaderLabels([
-                "SR Code", "Full Name", "College", "Program", "Time-In"
+                "SR Code", "Full Name", "College", "Program", "Time-In (AM/PM)"  # Updated header
             ])
 
             for row_idx, row_data in enumerate(self.records):
@@ -219,7 +286,7 @@ class AdminWindow(QWidget):
                     n.full_name,
                     n.College,
                     n.PROGRAM,
-                    time(time_in) AS time_in
+                    strftime('%I:%M:%S %p', time_in) AS time_in_12hr
                 FROM 
                     time_tbl t
                 JOIN 
@@ -230,7 +297,7 @@ class AdminWindow(QWidget):
                 ORDER BY 
                     t.date_in DESC;
             """
-            month_str = f"{month:02d}"  # Ensure 2-digit month
+            month_str = f"{month:02d}"
             year_str = str(year)
             
             self.cursor.execute(query, (month_str, year_str))
@@ -239,7 +306,7 @@ class AdminWindow(QWidget):
             self.table.setRowCount(len(self.records))
             self.table.setColumnCount(6)
             self.table.setHorizontalHeaderLabels([
-                "Date", "SR Code", "Full Name", "College", "Program", "Time-In"
+                "Date", "SR Code", "Full Name", "College", "Program", "Time-In (AM/PM)"  # Updated header
             ])
 
             for row_idx, row_data in enumerate(self.records):
@@ -382,7 +449,7 @@ class AdminWindow(QWidget):
             with open(path, mode='w', newline='', encoding='utf-8') as file:
                 writer = csv.writer(file)
                 writer.writerow(["SR Code", "Full Name", "College", "Program", "Campus"])
-                writer.writerow(["20-12345", "Juan Dela Cruz", "CEAS", "BSIT", "Alangilan"])
+                writer.writerow(["21-07343", "Cruz, Mykel Aris B", "CICS", "BSIT", "Alangilan"])
 
             QMessageBox.information(
                 self, 
@@ -400,7 +467,7 @@ class LoginPage(QWidget):
         self.setWindowTitle("Admin Login")
         self.setAutoFillBackground(True)
         self.init_ui()
-
+        self.setWindowIcon(load_icon("Batangas_State_Logo.png"))
     def resizeEvent(self, event):
         if not self.background_pixmap.isNull():
             scaled = self.background_pixmap.scaled(
@@ -482,8 +549,7 @@ class AttendanceApp(QWidget):
                           Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
         self.showMaximized()
         self.setAutoFillBackground(True)
-
-        # Initialize database before UI
+        self.setWindowIcon(load_icon("Batangas_State_Logo.png"))
         self.connect_db()
         self.set_background_image("ATTENDANCE.png")
         self.init_ui()
@@ -510,7 +576,8 @@ class AttendanceApp(QWidget):
 
     def connect_db(self):
         try:
-            db_path = resource_path("attendance.db")
+            # Get persistent database path
+            db_path = get_persistent_db_path()
             
             # Create database if it doesn't exist
             if not os.path.exists(db_path):
@@ -772,27 +839,16 @@ class AttendanceApp(QWidget):
         event.accept()
 
 if __name__ == "__main__":
-    # Verify all required resources exist
+    # Verify all required resources exist (except database which we'll handle specially)
     required_resources = [
         "ATTENDANCE.png",
         "Batangas_State_Logo.png",
-        "settings.png",
-        "attendance.db"
+        "settings.png"
     ]
     
     missing_resources = [res for res in required_resources if not os.path.exists(resource_path(res))]
     if missing_resources:
         print(f"Warning: Missing resources - {', '.join(missing_resources)}")
-        # Optionally create default database if missing
-        if "attendance.db" in missing_resources:
-            print("Creating new database...")
-            db_path = resource_path("attendance.db")
-            if db_path:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                # Create tables (same as in create_database method)
-                conn.commit()
-                conn.close()
     
     app = QApplication(sys.argv)
     window = AttendanceApp()

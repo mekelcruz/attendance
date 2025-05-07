@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('ATTENDANCE.png', '.'), ('Batangas_State_Logo.png', '.'), ('settings.png', '.'), ('attendance.db', '.')],
+    datas=[('ATTENDANCE.png', '.'), ('Batangas_State_Logo.png', '.'), ('settings.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['appicon.ico'],
 )
